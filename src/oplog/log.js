@@ -157,6 +157,69 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
   }
 
   /**
+   * Iteration tolerance for unfetchable entries.
+   *
+   * Context: when an oplog entry references a block that is not available
+   * locally and cannot be fetched from any connected peer (the "orphaned
+   * block" failure mode), `get(hash)` hangs until bitswap eventually gives
+   * up, or throws a LoadBlockFailedError. Without defensive handling,
+   * either outcome breaks iteration — a single unreachable entry prevents
+   * `.all()` / `.iterator()` from returning anything.
+   *
+   * At scale, unfetchable references are a normal consequence of peers
+   * going offline, networks being intermittent, and data being wiped on
+   * specific nodes. The system has to tolerate them as baseline behaviour.
+   *
+   * `safeFetchEntry` wraps `get(hash)` in a short timeout and swallows
+   * fetch errors, returning null for unfetchable entries. Callers that
+   * use `Promise.all(toFetch.map(safeFetchEntry))` then get an array that
+   * includes null for skipped entries, which they filter out before
+   * continuing traversal. Iteration becomes tolerant: good entries are
+   * yielded, bad ones are logged and skipped, traversal completes.
+   *
+   * Rate-limited logging: each unique hash is warned about at most
+   * UNAVAILABLE_LOG_LIMIT times to avoid spamming the logs when the same
+   * poisoned entries are repeatedly visited across traversals.
+   *
+   * See wesense-general-docs/general/Phase2Plan.md §4.4 "Chunk 1 — Layer 0:
+   * Iteration tolerance" for the full design rationale.
+   */
+  const ENTRY_FETCH_TIMEOUT_MS = 2000
+  const UNAVAILABLE_LOG_LIMIT = 3
+  const unavailableEntryLog = new Map()
+
+  const safeFetchEntry = async (hash) => {
+    let timer
+    try {
+      return await Promise.race([
+        get(hash),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`timeout after ${ENTRY_FETCH_TIMEOUT_MS}ms`)),
+            ENTRY_FETCH_TIMEOUT_MS
+          )
+        })
+      ])
+    } catch (err) {
+      const count = (unavailableEntryLog.get(hash) || 0) + 1
+      unavailableEntryLog.set(hash, count)
+      if (count <= UNAVAILABLE_LOG_LIMIT) {
+        const shortHash = typeof hash === 'string' ? hash.slice(0, 20) : String(hash).slice(0, 20)
+        const suffix = count === UNAVAILABLE_LOG_LIMIT ? ' (further occurrences silenced)' : ''
+        // Library-level logger isn't wired in; console.warn is the pragmatic
+        // choice. Callers that want to capture these can monkey-patch or
+        // rely on higher-level log aggregation.
+        console.warn(
+          `[orbitdb log ${id}] entry ${shortHash}... unavailable during traversal: ${err.message}${suffix}`
+        )
+      }
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
    * Append an new entry to the log
    *
    * @param {data} data Payload to add to the entry
@@ -364,7 +427,10 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
             const fetchEntries = (hash) => {
               if (!traversed[hash] && !fetched[hash]) {
                 fetched[hash] = true
-                return get(hash)
+                // Use safeFetchEntry so that unfetchable entries return null
+                // (then get filtered out below) instead of hanging/throwing.
+                // See safeFetchEntry definition above for rationale.
+                return safeFetchEntry(hash)
               }
             }
             const nexts = await Promise.all(toFetch.map(fetchEntries))
@@ -372,7 +438,7 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
               .filter(e => e !== null && e !== undefined)
               .reduce((res, acc) => Array.from(new Set([...res, ...acc.next])), [])
               .filter(notIndexed)
-            stack = [...nexts, ...stack]
+            stack = [...nexts.filter(e => e !== null && e !== undefined), ...stack]
             continue
           }
           // Yield the current entry
@@ -392,7 +458,10 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
           const fetchEntries = (hash) => {
             if (!traversed[hash] && !fetched[hash]) {
               fetched[hash] = true
-              return get(hash)
+              // Use safeFetchEntry so that unfetchable entries return null
+              // (then get filtered out below) instead of hanging/throwing.
+              // See safeFetchEntry definition above for rationale.
+              return safeFetchEntry(hash)
             }
           }
           // Fetch the next/reference entries
@@ -404,7 +473,7 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
             .reduce((res, acc) => Array.from(new Set([...res, ...acc.next])), [])
             .filter(notIndexed)
           // Add the fetched entries to the stack to be processed
-          stack = [...nexts, ...stack]
+          stack = [...nexts.filter(e => e !== null && e !== undefined), ...stack]
         }
       }
     }
