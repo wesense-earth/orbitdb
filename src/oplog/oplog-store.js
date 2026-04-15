@@ -37,11 +37,62 @@ const OplogStore = async ({ logHeads, entryStorage, headsStorage, indexStorage, 
     return entry != null
   }
 
+  /**
+   * Fetch a head entry by hash with a per-call timeout, returning null on
+   * timeout or fetch error. Used by heads() so that a single unfetchable
+   * head doesn't break the entire heads() call — partial results (the
+   * heads we CAN fetch) are returned and traversal proceeds from those.
+   *
+   * Rationale: at scale, peers go offline and entries can reference blocks
+   * no longer available anywhere. Without tolerance, a single such head
+   * makes heads() throw, which makes iterator() throw, which breaks every
+   * read path. The system has to tolerate unfetchability as baseline
+   * behaviour rather than treat it as catastrophic.
+   *
+   * Companion to safeFetchEntry in log.js (which provides the same
+   * tolerance during traversal) — see that function and Phase2Plan §4.4
+   * "Chunk 1 — Layer 0: Iteration tolerance" in wesense-general-docs for
+   * the full design rationale.
+   */
+  const HEAD_FETCH_TIMEOUT_MS = 2000
+  const UNAVAILABLE_HEAD_LOG_LIMIT = 3
+  const unavailableHeadLog = new Map()
+
+  const safeGetHead = async (hash) => {
+    let timer
+    try {
+      return await Promise.race([
+        get(hash),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`timeout after ${HEAD_FETCH_TIMEOUT_MS}ms`)),
+            HEAD_FETCH_TIMEOUT_MS
+          )
+        })
+      ])
+    } catch (err) {
+      const count = (unavailableHeadLog.get(hash) || 0) + 1
+      unavailableHeadLog.set(hash, count)
+      if (count <= UNAVAILABLE_HEAD_LOG_LIMIT) {
+        const shortHash = typeof hash === 'string' ? hash.slice(0, 20) : String(hash).slice(0, 20)
+        const suffix = count === UNAVAILABLE_HEAD_LOG_LIMIT ? ' (further occurrences silenced)' : ''
+        console.warn(
+          `[orbitdb oplog-store] head ${shortHash}... unavailable: ${err.message}${suffix}`
+        )
+      }
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   const heads = async () => {
     const heads_ = []
     for (const { hash } of await _heads.all()) {
-      const head = await get(hash)
-      heads_.push(head)
+      const head = await safeGetHead(hash)
+      if (head) {
+        heads_.push(head)
+      }
     }
     return heads_
   }
