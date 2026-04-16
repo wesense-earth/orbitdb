@@ -346,10 +346,42 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
       const connectedHeads = new Set()
 
       const traverseAndVerify = async () => {
-        const getEntries = Array.from(hashesToGet.values()).filter(has).map(get)
-        const entries = await Promise.all(getEntries)
+        // Use safeFetchEntry (same helper that traverse() uses) so that
+        // ancestors whose blocks are locally-indexed-but-unfetchable don't
+        // cause the whole verification chain to fail. This is the write-side
+        // counterpart of traverse()'s read-side iteration tolerance: a new
+        // entry arriving via sync can still be added to the local log even
+        // if some of its ancestors have orphan blocks we can't resolve.
+        //
+        // Without this, incoming sync of new entries fails any time the
+        // verification chain crosses a poisoned ancestor — meaning new
+        // state from peers never lands locally, the 'update' event never
+        // fires, and anything that depends on receiving registry updates
+        // (e.g. WeSense's registry-driven peer dialer) stops working.
+        //
+        // Unfetchable ancestors are skipped with a rate-limited log line
+        // (see safeFetchEntry). They're removed from the want-set so we
+        // don't loop on them. Their next/refs aren't traversed (we can't
+        // read them), so we stop building the DAG at that point — which
+        // is fine because we can't meaningfully verify a chain we can't
+        // read anyway.
+        //
+        // See wesense-general-docs Phase2Plan §4.4 Chunk 1 for the full
+        // design rationale.
+        const hashesInFlight = Array.from(hashesToGet.values()).filter(has)
+        const results = await Promise.all(hashesInFlight.map(safeFetchEntry))
 
-        for (const e of entries) {
+        for (let i = 0; i < results.length; i++) {
+          const e = results[i]
+          const requestedHash = hashesInFlight[i]
+
+          if (!e) {
+            // Fetch failed or timed out; skip this ancestor and remove it
+            // from the want-set so we don't retry infinitely in this traversal.
+            hashesToGet.delete(requestedHash)
+            continue
+          }
+
           hashesToGet.delete(e.hash)
 
           await verifyEntry(e)
