@@ -185,7 +185,12 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
    * Iteration tolerance" for the full design rationale.
    */
   const ENTRY_FETCH_TIMEOUT_MS = 2000
-  const UNAVAILABLE_LOG_LIMIT = 3
+  // Log each unique unfetchable hash exactly once per process lifetime.
+  // Higher limits amplify log volume by that multiplier (e.g. 3 → 3× the
+  // lines) without adding information — the second/third log of the same
+  // hash says nothing the first didn't. Operators see every unique
+  // problem once; repeated encounters of known-bad hashes are silent.
+  const UNAVAILABLE_LOG_LIMIT = 1
   const unavailableEntryLog = new Map()
 
   const safeFetchEntry = async (hash) => {
