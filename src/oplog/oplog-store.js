@@ -77,9 +77,8 @@ const OplogStore = async ({ logHeads, entryStorage, headsStorage, indexStorage, 
       unavailableHeadLog.set(hash, count)
       if (count <= UNAVAILABLE_HEAD_LOG_LIMIT) {
         const shortHash = typeof hash === 'string' ? hash.slice(0, 20) : String(hash).slice(0, 20)
-        const suffix = count === UNAVAILABLE_HEAD_LOG_LIMIT ? ' (further occurrences silenced)' : ''
         console.warn(
-          `[orbitdb oplog-store] head ${shortHash}... unavailable: ${err.message}${suffix}`
+          `[orbitdb oplog-store] head ${shortHash}... unavailable: ${err.message}`
         )
       }
       return null
