@@ -55,7 +55,9 @@ const OplogStore = async ({ logHeads, entryStorage, headsStorage, indexStorage, 
    * the full design rationale.
    */
   const HEAD_FETCH_TIMEOUT_MS = 2000
-  const UNAVAILABLE_HEAD_LOG_LIMIT = 3
+  // Log each unique unfetchable head exactly once per process lifetime.
+  // See the equivalent comment in log.js safeFetchEntry for the rationale.
+  const UNAVAILABLE_HEAD_LOG_LIMIT = 1
   const unavailableHeadLog = new Map()
 
   const safeGetHead = async (hash) => {
