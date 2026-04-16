@@ -210,12 +210,11 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
       unavailableEntryLog.set(hash, count)
       if (count <= UNAVAILABLE_LOG_LIMIT) {
         const shortHash = typeof hash === 'string' ? hash.slice(0, 20) : String(hash).slice(0, 20)
-        const suffix = count === UNAVAILABLE_LOG_LIMIT ? ' (further occurrences silenced)' : ''
         // Library-level logger isn't wired in; console.warn is the pragmatic
         // choice. Callers that want to capture these can monkey-patch or
         // rely on higher-level log aggregation.
         console.warn(
-          `[orbitdb log ${id}] entry ${shortHash}... unavailable during traversal: ${err.message}${suffix}`
+          `[orbitdb log ${id}] entry ${shortHash}... unavailable during traversal: ${err.message}`
         )
       }
       return null
