@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "@libp2p/circuit-relay-v2": "^4.1.7",
-    "@libp2p/gossipsub": "^15.0.16",
+    "@libp2p/gossipsub": "^16.0.5",
     "@orbitdb/simple-encryption": "^0.0.2",
     "blockstore-level": "^3.0.2",
     "c8": "^8.0.1",
