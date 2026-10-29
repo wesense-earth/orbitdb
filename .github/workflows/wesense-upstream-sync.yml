@@ -1,0 +1,116 @@
+name: WeSense upstream sync
+
+# The WeSense integration branch (wesense-main-v4) is upstream orbitdb/orbitdb plus the
+# features upstream does not have yet (TTL, iteration tolerance). This brings new upstream
+# releases in, so upstream security and bug fixes reach WeSense without anyone remembering.
+#
+# Weekly: merge the newest stable upstream tag into the integration branch on a sync/<tag>
+# branch, run the tests, and open a PR. A conflict or a failing test opens an issue instead.
+# Nothing is pushed to the integration branch itself.
+# Details: https://docs.wesense.earth/developers/dependency-updates
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  INTEGRATION_BRANCH: wesense-main-v4
+  UPSTREAM_REPO: https://github.com/orbitdb/orbitdb.git
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Find the newest stable upstream release
+        id: upstream
+        run: |
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --tags --quiet upstream
+          latest=$(git tag -l 'v[0-9]*' | grep -v -- '-' | sort -V | tail -1)
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$latest" HEAD; then
+            echo "Already contains $latest"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge the release on a sync branch
+        id: merge
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "sync/$TAG"
+          if git merge --no-ff -m "Merge upstream $TAG into $INTEGRATION_BRANCH" "$TAG"; then
+            # The workflow token cannot push changes to workflow files, and the fork keeps
+            # its own workflows, so restore them to the integration branch's versions.
+            git checkout "origin/$INTEGRATION_BRANCH" -- .github
+            if ! git diff --cached --quiet; then
+              git commit --amend --no-edit
+            fi
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        id: test
+        if: steps.upstream.outputs.needed == 'true' && steps.merge.outputs.conflict == 'false'
+        continue-on-error: true
+        run: |
+          npm ci
+          npm test
+
+      - name: Open a PR
+        if: steps.upstream.outputs.needed == 'true' && steps.merge.outputs.conflict == 'false' && steps.test.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.upstream.outputs.latest }}
+        run: |
+          git push --force origin "sync/$TAG"
+          if [ -z "$(gh pr list --head "sync/$TAG" --base "$INTEGRATION_BRANCH" --json number --jq '.[].number')" ]; then
+            gh pr create --head "sync/$TAG" --base "$INTEGRATION_BRANCH" \
+              --title "Merge upstream $TAG" \
+              --body "Merges upstream orbitdb/orbitdb $TAG into $INTEGRATION_BRANCH. The fork's test suite passed on the merge. Before merging, run the replication test in wesense-orbitdb against this branch."
+          fi
+
+      - name: Open an issue when the sync needs a person
+        if: steps.upstream.outputs.needed == 'true' && (steps.merge.outputs.conflict == 'true' || steps.test.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.upstream.outputs.latest }}
+          CONFLICT: ${{ steps.merge.outputs.conflict }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Upstream $TAG could not be synced automatically"
+          if [ -n "$(gh issue list --state open --search "$title in:title" --json number --jq '.[].number')" ]; then
+            exit 0
+          fi
+          if [ "$CONFLICT" = "true" ]; then
+            reason="Merging $TAG into $INTEGRATION_BRANCH conflicts with our patches (TTL, iteration tolerance)."
+          else
+            reason="$TAG merged cleanly but the fork's tests fail on the result."
+          fi
+          gh issue create --title "$title" --body "$reason Run: $RUN_URL
+
+          Upstream security and bug fixes in $TAG do not reach WeSense until this is resolved."
