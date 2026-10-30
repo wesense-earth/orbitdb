@@ -1,0 +1,193 @@
+name: WeSense upstream sync
+
+# The WeSense integration branch (wesense-main-v4) is upstream orbitdb/orbitdb plus the
+# features upstream does not have yet (TTL, iteration tolerance). This brings new upstream
+# releases in, so upstream security and bug fixes reach WeSense without anyone remembering.
+#
+# Weekly: merge the newest stable upstream tag into the integration branch on a sync/<tag>
+# branch, run the tests, and open a PR. A conflict or a failing test opens an issue instead.
+# Nothing is pushed to the integration branch itself.
+#
+# This branch keeps the dev and test tooling secure (see the package.json overrides). Upstream's
+# lockfile does not know about that, so after every merge the job redoes the lockfile-only
+# security update (npm audit fix, inside upstream's declared version ranges). If only the lockfile
+# conflicts, it takes upstream's and redoes the update; any other conflict still needs a person.
+#
+# Two jobs, so upstream code never runs next to a write token:
+#   test    (read-only token, no stored credentials) merges, installs without scripts and runs
+#           the tests, then hands the result over as a git bundle (data, not code).
+#   publish (write token) pushes the bundle's branch and opens the PR or issue. It runs no
+#           merged code.
+# Details: https://docs.wesense.earth/developers/dependency-updates
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  INTEGRATION_BRANCH: wesense-main-v4
+  UPSTREAM_REPO: https://github.com/orbitdb/orbitdb.git
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.upstream.outputs.latest }}
+      needed: ${{ steps.upstream.outputs.needed }}
+      conflict: ${{ steps.merge.outputs.conflict }}
+      tested: ${{ steps.test.outcome }}
+      audit: ${{ steps.audit.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Find the newest stable upstream release
+        id: upstream
+        run: |
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --tags --quiet upstream
+          latest=$(git tag -l 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$latest" ]; then
+            echo "No stable upstream release found"; exit 1
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$latest" HEAD; then
+            echo "Already contains $latest"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge the release on a sync branch
+        id: merge
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "sync/$TAG"
+          # Redo the lockfile-only security update; stops the step (and so the job) if npm fails.
+          secure_lockfile() {
+            npm install --package-lock-only --ignore-scripts
+            npm audit fix --package-lock-only --ignore-scripts
+            git add package-lock.json
+          }
+          if git merge --no-ff -m "Merge upstream $TAG into $INTEGRATION_BRANCH" "$TAG"; then
+            resolved=true
+          elif [ "$(git diff --name-only --diff-filter=U)" = "package-lock.json" ] \
+               && git checkout --theirs package-lock.json && secure_lockfile \
+               && git -c core.editor=true merge --continue; then
+            echo "Only package-lock.json conflicted: took upstream's and redid the security update"
+            resolved=true
+          else
+            resolved=false
+          fi
+          if [ "$resolved" = true ]; then
+            # The workflow token cannot push changes to workflow files, and the fork keeps
+            # its own workflows, so restore them to the integration branch's versions.
+            git checkout "origin/$INTEGRATION_BRANCH" -- .github
+            secure_lockfile
+            if ! git diff --cached --quiet; then
+              git commit -m "Security update of the lockfile (npm audit fix)"
+            fi
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        id: test
+        if: steps.upstream.outputs.needed == 'true' && steps.merge.outputs.conflict == 'false'
+        continue-on-error: true
+        run: |
+          # No install scripts, except the one native dev dependency the tests need.
+          npm ci --ignore-scripts
+          npm rebuild node-datachannel
+          npm test
+
+      - name: Audit result (shown in the log; the PR body repeats it)
+        id: audit
+        if: steps.test.outcome == 'success'
+        run: |
+          npm audit 2>&1 | tail -3
+          echo "summary=$(npm audit 2>&1 | grep -E 'found [0-9]+ vulnerabilities' || echo 'see the run log')" >> "$GITHUB_OUTPUT"
+
+      - name: Bundle the merge result
+        if: steps.test.outcome == 'success'
+        env:
+          TAG: ${{ steps.upstream.outputs.latest }}
+        run: git bundle create "$RUNNER_TEMP/sync.bundle" "sync/$TAG" "^origin/$INTEGRATION_BRANCH"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.test.outcome == 'success'
+        with:
+          name: sync-bundle
+          path: ${{ runner.temp }}/sync.bundle
+          retention-days: 3
+
+  publish:
+    needs: test
+    if: needs.test.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.test.outputs.tag }}
+      AUDIT: ${{ needs.test.outputs.audit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        if: needs.test.outputs.tested == 'success'
+        with:
+          name: sync-bundle
+          path: ${{ runner.temp }}
+
+      - name: Open a PR
+        if: needs.test.outputs.tested == 'success'
+        run: |
+          git fetch "$RUNNER_TEMP/sync.bundle" "sync/$TAG:sync/$TAG"
+          git push --force origin "sync/$TAG"
+          if [ -z "$(gh pr list --head "sync/$TAG" --base "$INTEGRATION_BRANCH" --json number --jq '.[].number')" ]; then
+            gh pr create --head "sync/$TAG" --base "$INTEGRATION_BRANCH" \
+              --title "Merge upstream $TAG" \
+              --body "Merges upstream orbitdb/orbitdb $TAG into $INTEGRATION_BRANCH. The fork's test suite passed on the merge, and npm audit says: $AUDIT. Before merging, run the replication test in wesense-orbitdb against this branch."
+          fi
+
+      - name: Open an issue when the sync needs a person
+        if: needs.test.outputs.conflict == 'true' || needs.test.outputs.tested == 'failure'
+        env:
+          CONFLICT: ${{ needs.test.outputs.conflict }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Upstream $TAG could not be synced automatically"
+          if [ -n "$(gh issue list --state open --search "$title in:title" --json number --jq '.[].number')" ]; then
+            exit 0
+          fi
+          if [ "$CONFLICT" = "true" ]; then
+            reason="Merging $TAG into $INTEGRATION_BRANCH conflicts with our patches (TTL, iteration tolerance)."
+          else
+            reason="$TAG merged cleanly but the fork's tests fail on the result."
+          fi
+          gh issue create --title "$title" --body "$reason Run: $RUN_URL. Upstream security and bug fixes in $TAG do not reach WeSense until this is resolved."
