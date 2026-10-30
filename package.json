@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "@libp2p/circuit-relay-v2": "^4.1.7",
-    "@libp2p/gossipsub": "^15.0.16",
+    "@libp2p/gossipsub": "^17.2.1",
     "@orbitdb/simple-encryption": "^0.0.2",
     "blockstore-level": "^3.0.2",
     "c8": "^8.0.1",
@@ -41,27 +41,17 @@
     "it-all": "^3.0.4",
     "jsdoc": "^4.0.2",
     "mocha": "^10.2.0",
-    "path-browserify": "^1.0.1",
-    "playwright-test": "^14.1.9",
     "rimraf": "^5.0.5",
-    "standard": "^17.1.0",
-    "webpack": "^5.89.0",
-    "webpack-cli": "^5.1.4"
+    "standard": "^17.1.0"
   },
   "scripts": {
     "test": "cross-env mocha --config test/.mocharc.json",
     "test:ci": "cross-env c8 mocha --config test/.mocharc.json",
-    "test:browser": "npm run build:tests && ./node_modules/.bin/playwright-test test/browser/bundle.js --runner mocha",
     "build": "npm run build:docs && npm run build:dist && npm run build:debug",
-    "build:dist": "webpack --config conf/webpack.config.js",
-    "build:debug": "webpack --config conf/webpack.debug.config.js",
     "build:docs": "jsdoc -c ./conf/jsdoc/jsdoc.json -r src/** -d ./docs/api -R ./docs/jsdoc/README.md",
-    "build:tests": "rm -f test/browser/bundle.js* && webpack --config ./conf/webpack.tests.config.js",
     "prepublishOnly": "npm run build",
     "lint": "standard --env=mocha",
-    "lint:fix": "standard --fix",
-    "webrtc": "node ./test/utils/relay.js",
-    "webrtc:background": "node ./test/utils/relay.js &"
+    "lint:fix": "standard --fix"
   },
   "standard": {
     "env": [
@@ -84,5 +74,9 @@
     "libp2p",
     "p2p",
     "peer-to-peer"
-  ]
+  ],
+  "overrides": {
+    "@libp2p/webrtc": "^7.0.2",
+    "serialize-javascript": "^7.1.4"
+  }
 }

@@ -65,7 +65,7 @@ const OplogStore = async ({ logHeads, entryStorage, headsStorage, indexStorage, 
     try {
       return await Promise.race([
         get(hash),
-        new Promise((_, reject) => {
+        new Promise((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new Error(`timeout after ${HEAD_FETCH_TIMEOUT_MS}ms`)),
             HEAD_FETCH_TIMEOUT_MS
