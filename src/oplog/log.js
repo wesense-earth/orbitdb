@@ -198,7 +198,7 @@ const Log = async (identity, { logId, logHeads, access, entryStorage, headsStora
     try {
       return await Promise.race([
         get(hash),
-        new Promise((_, reject) => {
+        new Promise((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new Error(`timeout after ${ENTRY_FETCH_TIMEOUT_MS}ms`)),
             ENTRY_FETCH_TIMEOUT_MS
